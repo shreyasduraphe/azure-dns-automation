@@ -1,7 +1,6 @@
 name: DNS Zone Request
 description: Request creation or deletion of a private DNS zone
 title: "[DNS] "
-labels: []
 
 body:
   - type: dropdown

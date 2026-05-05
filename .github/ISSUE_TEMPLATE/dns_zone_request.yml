@@ -1,0 +1,56 @@
+name: DNS Zone Request
+description: Request creation or deletion of a private DNS zone
+title: "[DNS] "
+labels: []
+
+body:
+  - type: dropdown
+    id: action
+    label: Action
+    description: Are you creating or deleting a zone?
+    options:
+      - Create
+      - Delete
+    validations:
+      required: true
+
+  - type: input
+    id: zone_fqdn
+    label: Zone FQDN
+    description: Full zone name e.g. app.test.local
+    placeholder: "app.test.local"
+    validations:
+      required: true
+
+  - type: input
+    id: ticket_number
+    label: Ticket Number
+    description: ADO work item or incident number — this becomes the branch name
+    placeholder: "ADO-1234 or INC-5678"
+    validations:
+      required: true
+
+  - type: input
+    id: team_owner
+    label: Team Owner
+    description: Team or individual responsible for this zone
+    placeholder: "platform-team"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    label: Environment
+    options:
+      - Production
+      - Non-Production
+      - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: justification
+    label: Justification / Notes
+    description: What is this zone for? Any special requirements?
+    validations:
+      required: true

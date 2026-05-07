@@ -346,6 +346,173 @@ Teams, eliminating the need to open GitHub for approvals.
 
 ---
 
+## Logging
+
+All automation events — pipeline runs, zone changes, Event Grid triggers, and
+Logic App actions — are logged to a centralized Azure Storage Account. This gives
+a single place to answer: what changed, when, who or what triggered it, and what
+the outcome was.
+
+### Log Sources
+
+| Source | What It Logs | Where |
+|---|---|---|
+| GitHub Actions pipeline | Zone create/delete, plan output, apply result, errors | Storage Account + GitHub Actions UI |
+| Event Grid + Logic App | Zone created outside pipeline, zone deleted outside pipeline, action taken | Storage Account |
+| `detect_unmanaged.py` | Nightly scan results — unmanaged zones and links found | Storage Account |
+| Azure Activity Log | All Azure API calls — who called what and when | Azure Monitor (built-in) |
+
+---
+
+### Storage Account Log Structure
+
+All logs written to the same Storage Account used for Terraform state,
+in a separate container:
+
+```
+Storage Account: tfstatedns
+├── Container: terraform-state     ← state files (existing)
+└── Container: dns-audit-logs      ← all audit logs
+    ├── pipeline/
+    │   └── 2026-05-07T14-32-00_create_app.internal.com.json
+    ├── eventgrid/
+    │   └── 2026-05-07T15-10-00_unmanaged_zone_deleted_rogue.local.json
+    └── drift-scan/
+        └── 2026-05-07T07-00-00_nightly_scan.json
+```
+
+---
+
+### Log Entry Format
+
+Every log entry follows the same structure so they can be queried consistently:
+
+```json
+{
+  "timestamp":   "2026-05-07T14:32:00Z",
+  "source":      "github-actions | event-grid | drift-scan",
+  "event_type":  "zone_created | zone_deleted | unmanaged_detected | zone_restored | drift_blocked",
+  "zone":        "app.internal.contoso.com",
+  "triggered_by": "pipeline | console | unknown",
+  "actor":       "ADO-1234 | shreyas@contoso.com | unknown",
+  "action_taken": "created | deleted | restored | blocked | notified",
+  "outcome":     "success | failure",
+  "detail":      "free text — error message or confirmation"
+}
+```
+
+---
+
+### Pipeline Logging
+
+The GitHub Actions pipeline writes a log entry at the end of every apply,
+whether it succeeds or fails:
+
+```python
+# scripts/log_event.py
+import json, os, datetime
+from azure.storage.blob import BlobServiceClient
+
+def write_log(event: dict):
+    event["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+    client = BlobServiceClient.from_connection_string(
+        os.environ["STORAGE_CONNECTION_STRING"]
+    )
+    container = client.get_container_client("dns-audit-logs")
+
+    ts      = event["timestamp"].replace(":", "-")
+    zone    = event.get("zone", "unknown").replace(".", "-")
+    source  = event.get("source", "unknown")
+    name    = f"{source}/{ts}_{event['event_type']}_{zone}.json"
+
+    container.upload_blob(
+        name=name,
+        data=json.dumps(event, indent=2),
+        overwrite=True
+    )
+    print(f"Log written: {name}")
+```
+
+Called at the end of the apply workflow:
+
+```yaml
+- name: Log apply result
+  if: always()
+  env:
+    STORAGE_CONNECTION_STRING: ${{ secrets.STORAGE_CONNECTION_STRING }}
+  run: |
+    python scripts/log_event.py \
+      --source github-actions \
+      --event-type zone_created \
+      --zone "${{ steps.process.outputs.zone_name }}" \
+      --actor "${{ steps.process.outputs.ticket_number }}" \
+      --outcome "${{ job.status }}"
+```
+
+---
+
+### Event Grid Logic App Logging
+
+Both Logic Apps (zone created, zone deleted) write a log entry before
+taking any action and again after, so there is always a record of what
+was detected and what was done:
+
+```json
+// Detection entry
+{
+  "timestamp":    "2026-05-07T15:10:00Z",
+  "source":       "event-grid",
+  "event_type":   "unmanaged_detected",
+  "zone":         "rogue.local",
+  "triggered_by": "console",
+  "actor":        "user@contoso.com",
+  "action_taken": "deleting",
+  "outcome":      "pending"
+}
+
+// Outcome entry (written after delete completes)
+{
+  "timestamp":    "2026-05-07T15:10:04Z",
+  "source":       "event-grid",
+  "event_type":   "unmanaged_deleted",
+  "zone":         "rogue.local",
+  "triggered_by": "console",
+  "actor":        "user@contoso.com",
+  "action_taken": "deleted",
+  "outcome":      "success"
+}
+```
+
+---
+
+### Querying Logs
+
+Logs in blob storage can be queried using Azure Storage Explorer, the CLI,
+or piped into Azure Monitor / Log Analytics for dashboards and alerts:
+
+```bash
+# List all log entries for a specific zone
+az storage blob list \
+  --account-name tfstatedns \
+  --container-name dns-audit-logs \
+  --query "[?contains(name, 'app-internal-contoso-com')]" \
+  --output table
+
+# Download and read a specific log entry
+az storage blob download \
+  --account-name tfstatedns \
+  --container-name dns-audit-logs \
+  --name "eventgrid/2026-05-07T15-10-00_unmanaged_deleted_rogue-local.json" \
+  --file log.json && cat log.json
+```
+
+For production, pipe logs into a **Log Analytics Workspace** so the team can
+query across all sources in one place and set up alerts (e.g. alert if more
+than 3 unmanaged zones are detected in a single day).
+
+---
+
 ## Rollout Plan
 
 ### Phase 1 — Foundation
